@@ -1,0 +1,59 @@
+pluginManagement {
+  repositories {
+    google {
+      content {
+        includeGroupByRegex("com\\.android.*")
+        includeGroupByRegex("com\\.google.*")
+        includeGroupByRegex("androidx.*")
+      }
+    }
+    mavenLocal()
+    mavenCentral()
+    gradlePluginPortal()
+  }
+}
+
+dependencyResolutionManagement {
+  repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+  repositories {
+    google()
+    mavenLocal()
+    mavenCentral()
+    maven { url "https://www.jitpack.io" }
+    maven {
+      def properties = new Properties()
+      def localPropertiesFiles = [
+        new File(rootDir, "local.properties"),
+        new File(rootDir.parentFile, "local.properties"),
+        new File(rootDir.parentFile.parentFile, "local.properties"),
+      ]
+      localPropertiesFiles.findAll { it.exists() }.each { file ->
+        file.withInputStream { properties.load(it) }
+      }
+      def nodeExecutable = System.getenv("NODE_BINARY")
+        ?: properties.getProperty("NODE_BINARY")
+        ?: properties.getProperty("nodeExecutable")
+
+      if (!nodeExecutable) {
+        for (candidate in ["/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node"]) {
+          if (new File(candidate).exists()) {
+            nodeExecutable = candidate
+            break
+          }
+        }
+      }
+
+      nodeExecutable = nodeExecutable ?: "node"
+
+      url(new File(
+        providers.exec {
+          workingDir(rootDir)
+          commandLine(nodeExecutable, "--print", "require.resolve('react-native/package.json', { paths: [process.cwd()] })")
+        }.standardOutput.asText.get().trim(),
+        "../android",
+      ))
+    }
+  }
+}
+
+rootProject.name = "MapConductorReactNativeHereAndroid"

@@ -1,0 +1,51 @@
+{
+  "name": "@mapconductor/reactnative-for-here",
+  "version": "0.1.0",
+  "description": "React Native provider for MapConductor HERE Maps - the RN-only native bridge; see @mapconductor/react-for-here for the web/React DOM provider.",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "android",
+    "ios",
+    "MapConductorReactForHere.podspec",
+    "react-native.config.js",
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "dev": "tsup src/index.ts --format cjs,esm --watch",
+    "clean": "rm -rf dist",
+    "test": "echo 'No tests yet'"
+  },
+  "keywords": [
+    "maps",
+    "here",
+    "react-native",
+    "typescript"
+  ],
+  "author": "MapConductor",
+  "license": "Apache2",
+  "peerDependencies": {
+    "@mapconductor/js-sdk-core": "*",
+    "react": "^19.2.0",
+    "react-native": ">=0.73.0"
+  },
+  "dependencies": {
+    "@mapconductor/js-sdk-core": "*",
+    "@mapconductor/js-sdk-react": "*",
+    "@mapconductor/react-for-here": "*"
+  },
+  "devDependencies": {
+    "react": "^19.2.7",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,101 @@
+buildscript {
+  repositories {
+    google()
+    mavenCentral()
+    mavenLocal()
+  }
+  dependencies {
+    classpath "com.android.tools.build:gradle:9.2.1"
+    classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:2.2.10"
+    classpath "org.jetbrains.kotlin:compose-compiler-gradle-plugin:2.2.10"
+  }
+}
+
+apply plugin: "com.android.library"
+apply plugin: "org.jetbrains.kotlin.android"
+apply plugin: "org.jetbrains.kotlin.plugin.compose"
+
+// Mirrors reactnative-for-googlemaps/android/build.gradle's `loadGoogleMapsApiKey` - HERE needs
+// two credentials (an access key id + secret) instead of one API key, injected as manifest
+// placeholders consumed by this package's own AndroidManifest.xml `<meta-data>` entries, which
+// `HereMapViewControllerStore.initSDK` (android-for-here) reads at first map mount.
+def loadHereCredential = { propertyNames ->
+  def properties = new Properties()
+  [
+    rootProject.file("local.properties"),
+    project.file("local.properties"),
+  ].findAll { it.exists() }.each { file ->
+    file.withInputStream { properties.load(it) }
+  }
+
+  for (name in propertyNames) {
+    def value = properties.getProperty(name)
+      ?: rootProject.findProperty(name)
+      ?: project.findProperty(name)
+      ?: System.getenv(name)
+    if (value) return value
+  }
+  return ""
+}
+
+def hereAccessKeyId = loadHereCredential(["ANDROID_HERE_ACCESS_KEY_ID", "HERE_ACCESS_KEY_ID"])
+def hereAccessKeySecret = loadHereCredential(["ANDROID_HERE_ACCESS_KEY_SECRET", "HERE_ACCESS_KEY_SECRET"])
+
+rootProject.subprojects { subproject ->
+  subproject.plugins.withId("com.android.application") {
+    subproject.android.defaultConfig {
+      def placeholders = manifestPlaceholders
+      if (!placeholders["hereAccessKeyId"]) {
+        placeholders["hereAccessKeyId"] = hereAccessKeyId
+      }
+      if (!placeholders["hereAccessKeySecret"]) {
+        placeholders["hereAccessKeySecret"] = hereAccessKeySecret
+      }
+    }
+  }
+}
+
+android {
+  namespace "com.mapconductor.react.here"
+
+  compileSdk = rootProject.ext.has("compileSdkVersion") ? rootProject.ext.compileSdkVersion : 35
+
+  defaultConfig {
+    minSdk = rootProject.ext.has("minSdkVersion") ? rootProject.ext.minSdkVersion : 24
+  }
+
+  buildFeatures {
+    compose true
+  }
+
+  sourceSets {
+    main {
+      java.srcDirs += ["src/main/java"]
+    }
+  }
+}
+
+repositories {
+  mavenLocal()
+  google()
+  mavenCentral()
+}
+
+dependencies {
+  implementation "com.facebook.react:react-android"
+  implementation platform("androidx.compose:compose-bom:2025.02.00")
+  implementation "androidx.compose.ui:ui"
+  implementation "androidx.compose.foundation:foundation"
+  implementation project(":mapconductor_js-sdk-react")
+  api("com.mapconductor:core:1.2.0")
+  api("com.mapconductor:compose:1.2.0")
+  api("com.mapconductor:for-here:1.2.0")
+  // com.mapconductor:for-here only *compiles* against the HERE SDK (it's a proprietary binary,
+  // not redistributable), so consumers must supply the actual heresdk*.aar themselves - same
+  // requirement android-for-here's own sample-app has, and the same "vendor a sibling proprietary
+  // binary by relative path" approach ios-for-here/MapConductorForHERE.podspec already takes for
+  // heresdk.xcframework. In this monorepo dev layout that's ../../../android-sdk/libs; consumers
+  // outside this monorepo should instead drop heresdk*.aar into their own app's android/libs/ and
+  // add the equivalent fileTree dependency there.
+  implementation fileTree(dir: "../../../android-sdk/libs", include: ["heresdk*.jar", "heresdk*.aar"])
+}
