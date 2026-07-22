@@ -60,16 +60,15 @@ import com.mapconductor.here.raster.HereRasterLayerOverlayRenderer
 import com.mapconductor.react.extensions.NativeMapExtensionHostState
 import com.mapconductor.react.here.circle.circleStateFromReadableMap
 import com.mapconductor.react.here.circle.circleStatesFromReadableArray
-import com.mapconductor.react.here.marker.ReactNativeMarkerState
-import com.mapconductor.react.here.marker.ReactNativeMarkerIcon
-import com.mapconductor.react.here.marker.fromReadableMap
-import com.mapconductor.react.here.marker.markerStatesFromBatchReadableMap
-import com.mapconductor.react.here.marker.toMarkerIcon
 import com.mapconductor.react.here.polyline.polylineStateFromReadableMap
 import com.mapconductor.react.here.polyline.polylineStatesFromReadableArray
 import com.mapconductor.react.here.polygon.polygonStateFromReadableMap
 import com.mapconductor.react.here.polygon.polygonStatesFromReadableArray
 import com.mapconductor.react.marker.MarkerScaleBridge
+import com.mapconductor.react.marker.applyNativeMarkerUpdate
+import com.mapconductor.react.marker.decodeNativeMarkerBatch
+import com.mapconductor.react.marker.decodeNativeMarkerIcon
+import com.mapconductor.react.marker.decodeNativeMarkerState
 import com.mapconductor.react.groundimage.groundImageStateFromReadableMap
 import com.mapconductor.react.groundimage.groundImageStatesFromReadableArray
 import com.mapconductor.react.raster.rasterLayerStateFromReadableMap
@@ -388,8 +387,12 @@ class HereMapViewWrapper(context: Context) :
         markerCoroutine.launch {
             val previousStates = markerStates
             val nextStates =
-                markerStatesFromBatchReadableMap(payload)
-                    .associate { it.id to it.toCoreMarkerState(previousStates[it.id]) }
+                decodeNativeMarkerBatch(
+                    payload = payload,
+                    context = context,
+                    previousStates = previousStates,
+                    onMarkerEvent = ::handleMarkerEvent,
+                ).associateBy { it.id }
             markerStates = nextStates
             runMarkerControllerCall { mapController?.compositionMarkers(nextStates.values.toList()) }
             withContext(Dispatchers.Main) {
@@ -413,7 +416,7 @@ class HereMapViewWrapper(context: Context) :
                     emptyList()
                 } else {
                     (0 until iconDictionary.size()).map { index ->
-                        ReactNativeMarkerIcon.fromReadableMap(iconDictionary.getMap(index))?.toMarkerIcon(context)
+                        decodeNativeMarkerIcon(iconDictionary.getMap(index), context)
                     }
                 }
         }
@@ -432,8 +435,13 @@ class HereMapViewWrapper(context: Context) :
                 markerTrace("append ignored generation=$generation sequence=$sequence current=$markerCompositionGeneration")
                 return@launch
             }
-            markerStatesFromBatchReadableMap(payload, markerCompositionIcons).forEach { state ->
-                markerCompositionBuffer[state.id] = state.toCoreMarkerState(null)
+            decodeNativeMarkerBatch(
+                payload = payload,
+                context = context,
+                sharedIcons = markerCompositionIcons,
+                onMarkerEvent = ::handleMarkerEvent,
+            ).forEach { state ->
+                markerCompositionBuffer[state.id] = state
             }
             markerTrace(
                 "append decoded generation=$generation sequence=$sequence count=$count " +
@@ -473,12 +481,15 @@ class HereMapViewWrapper(context: Context) :
     }
 
     fun updateMarker(marker: ReadableMap?) {
+        if (marker == null) return
         markerCoroutine.launch {
+            val id = if (marker.hasKey("id") && !marker.isNull("id")) marker.getString("id") else null
             val previousStates = markerStates
-            val state = ReactNativeMarkerState.fromReadableMap(marker) ?: return@launch
-            val next = state.toCoreMarkerState(previousStates[state.id])
-            markerStates = markerStates + (state.id to next)
-            state.animation?.let(next::animate)
+            val next =
+                (id?.let(previousStates::get)?.also { existing -> applyNativeMarkerUpdate(marker, context, existing) }
+                    ?: decodeNativeMarkerState(marker, context, ::handleMarkerEvent))
+                    ?: return@launch
+            markerStates = markerStates + (next.id to next)
             runMarkerControllerCall { mapController?.updateMarker(next) }
             withContext(Dispatchers.Main) {
                 emitMarkerScreenPositions()
@@ -806,40 +817,25 @@ class HereMapViewWrapper(context: Context) :
         }
     }
 
-    private fun ReactNativeMarkerState.toCoreMarkerState(previous: MarkerState?): MarkerState {
-        val resolvedIcon = this.resolvedIcon ?: icon?.toMarkerIcon(context)
-        val next =
-            previous ?: MarkerState(
-                id = id,
-                position = position,
-                clickable = clickable,
-                draggable = draggable,
-                zIndex = zIndex?.toInt(),
-                icon = resolvedIcon,
-                onClick = {
-                    emit("topMarkerClick", Arguments.createMap().apply { putString("markerId", id) })
-                },
-            )
-
-        next.position = position
-        next.clickable = clickable
-        next.draggable = draggable
-        next.zIndex = zIndex?.toInt()
-        next.icon = resolvedIcon
-        next.onClick =
-            if (clickable) {
-                {
-                    emit("topMarkerClick", Arguments.createMap().apply { putString("markerId", id) })
-                }
-            } else {
-                null
-            }
-        next.onDragStart = { emitMarkerDrag("topMarkerDragStart", it) }
-        next.onDrag = { emitMarkerDrag("topMarkerDrag", it) }
-        next.onDragEnd = { emitMarkerDrag("topMarkerDragEnd", it) }
-        next.onAnimateStart = { emitMarkerAnimate("topMarkerAnimateStart", it) }
-        next.onAnimateEnd = { emitMarkerAnimate("topMarkerAnimateEnd", it) }
-        return next
+    /**
+     * The single `onMarkerEvent` callback handed to every `decodeNativeMarkerBatch`/
+     * `decodeNativeMarkerState`/`applyNativeMarkerUpdate` call (the shared codec in
+     * `com.mapconductor.react.marker.NativeMarkerCodec`, also used identically by iOS's
+     * `mcMarkerStatesFromBatch`/`mcMarkerState`). Dispatches by the codec's `eventName` to the
+     * matching `topX` RN event.
+     */
+    private fun handleMarkerEvent(
+        eventName: String,
+        state: MarkerState,
+    ) {
+        when (eventName) {
+            "markerClick" -> emit("topMarkerClick", Arguments.createMap().apply { putString("markerId", state.id) })
+            "markerDragStart" -> emitMarkerDrag("topMarkerDragStart", state)
+            "markerDrag" -> emitMarkerDrag("topMarkerDrag", state)
+            "markerDragEnd" -> emitMarkerDrag("topMarkerDragEnd", state)
+            "markerAnimateStart" -> emitMarkerAnimate("topMarkerAnimateStart", state)
+            "markerAnimateEnd" -> emitMarkerAnimate("topMarkerAnimateEnd", state)
+        }
     }
 
     private fun emitMarkerDrag(

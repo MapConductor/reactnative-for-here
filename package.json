@@ -1,6 +1,7 @@
 {
   "name": "@mapconductor/reactnative-for-here",
-  "version": "0.1.0",
+  "version": "0.1.1",
+  "private": true,
   "description": "React Native provider for MapConductor HERE Maps - the RN-only native bridge; see @mapconductor/react-for-here for the web/React DOM provider.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
