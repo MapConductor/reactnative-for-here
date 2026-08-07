@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { findNodeHandle, StyleSheet, View } from 'react-native';
-import { GeoPoint, MapCameraPosition } from '@mapconductor/js-sdk-core';
+import { GeoPoint, MapCameraPosition, mapViewStateInternal } from '@mapconductor/js-sdk-core';
 import type { MarkerTilingOptions } from '@mapconductor/js-sdk-core';
 import {
   InfoBubbleLayer,
   MapAttributionOverlay,
   MapContext,
+  createMapContextValue,
   MapViewScope,
   MapServiceRegistryProvider,
   MapViewScopeProvider,
@@ -157,7 +158,7 @@ export function HereMapView({
   useEffect(() => {
     if (!state || !controller) return undefined;
 
-    state.setController(controller);
+    mapViewStateInternal(state).setController(controller);
 
     controller.setMapInitializedListener(() => {
         setIsLoaded(true);
@@ -167,20 +168,20 @@ export function HereMapView({
     controller.setMapClickListener((point) => onMapClickRef.current?.(point));
     controller.setMapLongClickListener((point) => onMapLongClickRef.current?.(point));
     controller.setCameraMoveStartListener((camera) => {
-      state.updateCameraPosition(camera);
+      mapViewStateInternal(state).updateCameraPosition(camera);
       onCameraMoveStartRef.current?.(camera);
     });
     controller.setCameraMoveListener((camera) => {
-      state.updateCameraPosition(camera);
+      mapViewStateInternal(state).updateCameraPosition(camera);
       onCameraMoveRef.current?.(camera);
     });
     controller.setCameraMoveEndListener((camera) => {
-      state.updateCameraPosition(camera);
+      mapViewStateInternal(state).updateCameraPosition(camera);
       onCameraMoveEndRef.current?.(camera);
     });
 
     return () => {
-      state.setController(null);
+      mapViewStateInternal(state).setController(null);
       controller.destroy();
     };
   }, [controller, state]);
@@ -193,7 +194,7 @@ export function HereMapView({
   useMarkerRenderingSupport(state, scope, controller);
 
   return (
-    <MapContext.Provider value={{ controller, isReady, isLoaded, state: state ?? null }}>
+    <MapContext.Provider value={createMapContextValue({ controller, isReady, isLoaded, state: state ?? null })}>
       <MapServiceRegistryProvider registry={state?.serviceRegistry}>
         <MapViewScopeProvider scope={scope}>
           <View style={style ?? styles.container}>
