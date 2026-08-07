@@ -24,6 +24,9 @@ import com.mapconductor.compose.polygon.LocalPolygonCollector
 import com.mapconductor.compose.polyline.LocalPolylineCollector
 import com.mapconductor.compose.raster.LocalRasterLayerCollector
 import com.mapconductor.core.ResourceProvider
+import com.mapconductor.react.wrapper.MapViewWrapperEventEmitter
+import com.mapconductor.react.wrapper.MapViewWrapperScreenPositions
+import com.mapconductor.react.wrapper.WrapperInfoBubblePosition
 import com.mapconductor.core.circle.CircleCapableInterface
 import com.mapconductor.core.features.GeoPoint
 import com.mapconductor.core.groundimage.GroundImageCapableInterface
@@ -87,11 +90,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 
-private data class HereWrapperInfoBubblePosition(
-    val id: String,
-    val point: GeoPoint,
-)
-
 class HereMapViewWrapper(context: Context) :
     FrameLayout(context) {
 
@@ -142,18 +140,19 @@ class HereMapViewWrapper(context: Context) :
     private var rasterLayerStates: Map<String, com.mapconductor.core.raster.RasterLayerState> = emptyMap()
     private var groundImageStates: Map<String, com.mapconductor.core.groundimage.GroundImageState> = emptyMap()
     private var markerTilingOptions = MarkerTilingOptions.Default
-    private var infoBubblePositions: List<HereWrapperInfoBubblePosition> = emptyList()
+    private var infoBubblePositions: List<WrapperInfoBubblePosition> = emptyList()
 
     // Camera listeners fire on every frame during pan/zoom. When there is nothing to
     // report (marker tiling active, no markers, no open info bubbles), emitting an empty
     // positions payload every frame floods the bridge and forces a JS setState per frame,
     // so an empty payload is emitted once as a clearing event and then suppressed until
     // there is data again. Both flags are only touched on the main thread.
-    private var emittedEmptyMarkerScreenPositions = false
-    private var emittedEmptyInfoBubbleScreenPositions = false
+    private val events = MapViewWrapperEventEmitter(this)
+    private val screenPositions = MapViewWrapperScreenPositions(events, mainCoroutine)
+
     private val nativeMapExtensionHost =
         NativeMapExtensionHostState(context) { extensionId, eventName, payload ->
-            emit(
+            events.emit(
                 "topNativeMapExtensionEvent",
                 Arguments.createMap().apply {
                     putString("extensionId", extensionId)
@@ -267,7 +266,7 @@ class HereMapViewWrapper(context: Context) :
                 runMarkerControllerCall { controller.compositionMarkers(markerStates.values.toList()) }
             }
             markerTrace("SDK onMapLoaded callback")
-            emit("topMapLoaded", Arguments.createMap())
+            events.emit("topMapLoaded", Arguments.createMap())
             emitMarkerScreenPositions()
             emitInfoBubbleScreenPositions()
 
@@ -307,18 +306,7 @@ class HereMapViewWrapper(context: Context) :
     }
 
     fun setInfoBubblePositions(positions: ReadableArray?) {
-        infoBubblePositions =
-            (0 until (positions?.size() ?: 0)).mapNotNull { index ->
-                val position = positions?.getMap(index) ?: return@mapNotNull null
-                val id =
-                    if (position.hasKey("id") && !position.isNull("id")) {
-                        position.getString("id")
-                    } else {
-                        null
-                    } ?: return@mapNotNull null
-                val point = GeoPoint.fromReadableMap(position) ?: return@mapNotNull null
-                HereWrapperInfoBubblePosition(id = id, point = point)
-            }
+        infoBubblePositions = MapViewWrapperScreenPositions.parseInfoBubblePositions(positions)
         emitInfoBubbleScreenPositions()
     }
 
@@ -330,28 +318,28 @@ class HereMapViewWrapper(context: Context) :
     private fun configureController(controller: HereMapViewController) {
         controller.setCameraMoveStartListener { camera ->
             pendingCameraPosition = camera
-            emitCameraEvent("topCameraMoveStart", camera)
+            events.emitCameraEvent("topCameraMoveStart", camera.toWritableMap())
             emitMarkerScreenPositions()
             emitInfoBubbleScreenPositions()
         }
         controller.setCameraMoveListener { camera ->
             pendingCameraPosition = camera
-            emitCameraEvent("topCameraMove", camera)
+            events.emitCameraEvent("topCameraMove", camera.toWritableMap())
             emitMarkerScreenPositions()
             emitInfoBubbleScreenPositions()
         }
         controller.setCameraMoveEndListener { camera ->
             pendingCameraPosition = camera
-            emitCameraEvent("topCameraMoveEnd", camera)
+            events.emitCameraEvent("topCameraMoveEnd", camera.toWritableMap())
             emitMarkerScreenPositions()
             emitInfoBubbleScreenPositions()
         }
         controller.setMapClickListener {
             if (!nativeMapExtensionHost.dispatchMapClick(it, pendingCameraPosition.zoom)) {
-                emitPointEvent("topMapClick", it)
+                events.emitPointEvent("topMapClick", it)
             }
         }
-        controller.setMapLongClickListener { emitPointEvent("topMapLongClick", it) }
+        controller.setMapLongClickListener { events.emitPointEvent("topMapLongClick", it) }
     }
 
     fun clearOverlays() {
@@ -391,7 +379,7 @@ class HereMapViewWrapper(context: Context) :
                     payload = payload,
                     context = context,
                     previousStates = previousStates,
-                    onMarkerEvent = ::handleMarkerEvent,
+                    onMarkerEvent = events::handleMarkerEvent,
                 ).associateBy { it.id }
             markerStates = nextStates
             runMarkerControllerCall { mapController?.compositionMarkers(nextStates.values.toList()) }
@@ -439,7 +427,7 @@ class HereMapViewWrapper(context: Context) :
                 payload = payload,
                 context = context,
                 sharedIcons = markerCompositionIcons,
-                onMarkerEvent = ::handleMarkerEvent,
+                onMarkerEvent = events::handleMarkerEvent,
             ).forEach { state ->
                 markerCompositionBuffer[state.id] = state
             }
@@ -449,7 +437,7 @@ class HereMapViewWrapper(context: Context) :
             )
             withContext(Dispatchers.Main) {
                 markerTrace("append ACK emit generation=$generation sequence=$sequence")
-                emitMarkerCompositionBatchProcessed(generation, sequence)
+                events.emitMarkerCompositionBatchProcessed(generation, sequence)
             }
         }
     }
@@ -487,7 +475,7 @@ class HereMapViewWrapper(context: Context) :
             val previousStates = markerStates
             val next =
                 (id?.let(previousStates::get)?.also { existing -> applyNativeMarkerUpdate(marker, context, existing) }
-                    ?: decodeNativeMarkerState(marker, context, ::handleMarkerEvent))
+                    ?: decodeNativeMarkerState(marker, context, events::handleMarkerEvent))
                     ?: return@launch
             markerStates = markerStates + (next.id to next)
             runMarkerControllerCall { mapController?.updateMarker(next) }
@@ -499,42 +487,42 @@ class HereMapViewWrapper(context: Context) :
     }
 
     fun compositionPolylines(polylines: ReadableArray?) {
-        val states = polylineStatesFromReadableArray(polylines, ::emitPolylineClick)
+        val states = polylineStatesFromReadableArray(polylines, events::emitPolylineClick)
         mainCoroutine.launch {
             runMarkerControllerCall { mapController?.compositionPolylines(states) }
         }
     }
 
     fun compositionCircles(circles: ReadableArray?) {
-        val states = circleStatesFromReadableArray(circles, ::emitCircleClick)
+        val states = circleStatesFromReadableArray(circles, events::emitCircleClick)
         mainCoroutine.launch {
             runMarkerControllerCall { mapController?.compositionCircles(states) }
         }
     }
 
     fun updateCircle(circle: ReadableMap?) {
-        val state = circleStateFromReadableMap(circle, ::emitCircleClick) ?: return
+        val state = circleStateFromReadableMap(circle, events::emitCircleClick) ?: return
         mainCoroutine.launch {
             runMarkerControllerCall { mapController?.updateCircle(state) }
         }
     }
 
     fun compositionPolygons(polygons: ReadableArray?) {
-        val states = polygonStatesFromReadableArray(polygons, ::emitPolygonClick)
+        val states = polygonStatesFromReadableArray(polygons, events::emitPolygonClick)
         mainCoroutine.launch {
             runMarkerControllerCall { mapController?.compositionPolygons(states) }
         }
     }
 
     fun updatePolygon(polygon: ReadableMap?) {
-        val state = polygonStateFromReadableMap(polygon, ::emitPolygonClick) ?: return
+        val state = polygonStateFromReadableMap(polygon, events::emitPolygonClick) ?: return
         mainCoroutine.launch {
             runMarkerControllerCall { mapController?.updatePolygon(state) }
         }
     }
 
     fun updatePolyline(polyline: ReadableMap?) {
-        val state = polylineStateFromReadableMap(polyline, ::emitPolylineClick) ?: return
+        val state = polylineStateFromReadableMap(polyline, events::emitPolylineClick) ?: return
         mainCoroutine.launch {
             runMarkerControllerCall { mapController?.updatePolyline(state) }
         }
@@ -551,7 +539,7 @@ class HereMapViewWrapper(context: Context) :
     }
 
     fun compositionGroundImages(images: ReadableArray?) {
-        val states = groundImageStatesFromReadableArray(images, context, ::emitGroundImageClick)
+        val states = groundImageStatesFromReadableArray(images, context, events::emitGroundImageClick)
         val previousIds = groundImageStates.keys
         groundImageStates = states.associateBy { it.id }
         val extensionImages =
@@ -561,7 +549,7 @@ class HereMapViewWrapper(context: Context) :
     }
 
     fun updateGroundImage(image: ReadableMap?) {
-        val state = groundImageStateFromReadableMap(image, context, ::emitGroundImageClick) ?: return
+        val state = groundImageStateFromReadableMap(image, context, events::emitGroundImageClick) ?: return
         groundImageStates = groundImageStates + (state.id to state)
         extensionScope.groundImageCollector.flow.value =
             extensionScope.groundImageCollector.flow.value
@@ -624,105 +612,12 @@ class HereMapViewWrapper(context: Context) :
         emitInfoBubbleScreenPositions()
     }
 
-    private fun emitCameraEvent(
-        eventName: String,
-        camera: MapCameraPosition,
-    ) {
-        emit(eventName, Arguments.createMap().apply { putMap("cameraPosition", camera.toWritableMap()) })
+    private fun emitMarkerScreenPositions() {
+        screenPositions.emitMarkers(markerStates.values, markerTilingOptions, { mapHolder?.toScreenOffset(it) })
     }
 
-    private fun emitPolylineClick(
-        id: String,
-        event: com.mapconductor.core.polyline.PolylineEvent,
-    ) {
-        emit(
-            "topPolylineClick",
-            Arguments.createMap().apply {
-                putString("polylineId", id)
-                putMap("point", GeoPoint.from(event.clicked).toWritableMap())
-            },
-        )
-    }
-
-    private fun emitCircleClick(
-        id: String,
-        event: com.mapconductor.core.circle.CircleEvent,
-    ) {
-        emit(
-            "topCircleClick",
-            Arguments.createMap().apply {
-                putString("circleId", id)
-                putMap("point", GeoPoint.from(event.clicked).toWritableMap())
-            },
-        )
-    }
-
-    private fun emitPolygonClick(
-        id: String,
-        event: com.mapconductor.core.polygon.PolygonEvent,
-    ) {
-        emit(
-            "topPolygonClick",
-            Arguments.createMap().apply {
-                putString("polygonId", id)
-                putMap("point", GeoPoint.from(event.clicked).toWritableMap())
-            },
-        )
-    }
-
-    private fun emitGroundImageClick(
-        id: String,
-        event: com.mapconductor.core.groundimage.GroundImageEvent,
-    ) {
-        val clicked = event.clicked ?: return
-        emit(
-            "topGroundImageClick",
-            Arguments.createMap().apply {
-                putString("groundImageId", id)
-                putMap("point", GeoPoint.from(clicked).toWritableMap())
-            },
-        )
-    }
-
-    private fun emit(
-        eventName: String,
-        event: WritableMap,
-    ) {
-        val reactContext = context as? ReactContext ?: return
-        val surfaceId = UIManagerHelper.getSurfaceId(this)
-        UIManagerHelper.getEventDispatcher(reactContext)
-            ?.dispatchEvent(HereMapViewWrapperEvent(surfaceId, id, eventName, event))
-    }
-
-    private fun emitMarkerCompositionBatchProcessed(
-        generation: Int,
-        sequence: Int,
-    ) {
-        emit(
-            "topMarkerCompositionBatchProcessed",
-            Arguments.createMap().apply {
-                putInt("generation", generation)
-                putInt("sequence", sequence)
-            },
-        )
-    }
-
-    private fun emitPointEvent(
-        eventName: String,
-        point: GeoPoint,
-    ) {
-        emit(
-            eventName,
-            Arguments.createMap().apply {
-                putMap(
-                    "point",
-                    Arguments.createMap().apply {
-                        putDouble("latitude", point.latitude)
-                        putDouble("longitude", point.longitude)
-                    },
-                )
-            },
-        )
+    private fun emitInfoBubbleScreenPositions() {
+        screenPositions.emitInfoBubbles(infoBubblePositions, { mapHolder?.toScreenOffset(it) })
     }
 
     private fun markerTrace(message: String) {
@@ -750,219 +645,4 @@ class HereMapViewWrapper(context: Context) :
         }
     }
 
-    private fun emitMarkerScreenPositions() {
-        val tilingActive = markerStates.size >= markerTilingOptions.minMarkerCount
-        if (tilingActive || markerStates.isEmpty()) {
-            if (emittedEmptyMarkerScreenPositions) return
-            emittedEmptyMarkerScreenPositions = true
-            mainCoroutine.launch {
-                emit(
-                    "topMarkerScreenPositions",
-                    Arguments.createMap().apply { putArray("positions", Arguments.createArray()) },
-                )
-            }
-            return
-        }
-        emittedEmptyMarkerScreenPositions = false
-        mainCoroutine.launch {
-            val density = ResourceProvider.getDensity()
-            val holder = mapHolder ?: return@launch
-            val array =
-                Arguments.createArray().apply {
-                    markerStates.values.forEach { marker ->
-                        val offset = holder.toScreenOffset(marker.position) ?: return@forEach
-                        pushMap(
-                            Arguments.createMap().apply {
-                                putString("markerId", marker.id)
-                                putDouble("x", offset.x.toDouble() / density)
-                                putDouble("y", offset.y.toDouble() / density)
-                            },
-                        )
-                    }
-                }
-            emit("topMarkerScreenPositions", Arguments.createMap().apply { putArray("positions", array) })
-        }
-    }
-
-    private fun emitInfoBubbleScreenPositions() {
-        if (infoBubblePositions.isEmpty()) {
-            if (emittedEmptyInfoBubbleScreenPositions) return
-            emittedEmptyInfoBubbleScreenPositions = true
-            mainCoroutine.launch {
-                emit(
-                    "topInfoBubbleScreenPositions",
-                    Arguments.createMap().apply { putArray("positions", Arguments.createArray()) },
-                )
-            }
-            return
-        }
-        emittedEmptyInfoBubbleScreenPositions = false
-        mainCoroutine.launch {
-            val density = ResourceProvider.getDensity()
-            val holder = mapHolder ?: return@launch
-            val array =
-                Arguments.createArray().apply {
-                    infoBubblePositions.forEach { position ->
-                        val offset = holder.toScreenOffset(position.point) ?: return@forEach
-                        pushMap(
-                            Arguments.createMap().apply {
-                                putString("id", position.id)
-                                putDouble("x", offset.x.toDouble() / density)
-                                putDouble("y", offset.y.toDouble() / density)
-                            },
-                        )
-                    }
-                }
-            emit("topInfoBubbleScreenPositions", Arguments.createMap().apply { putArray("positions", array) })
-        }
-    }
-
-    /**
-     * The single `onMarkerEvent` callback handed to every `decodeNativeMarkerBatch`/
-     * `decodeNativeMarkerState`/`applyNativeMarkerUpdate` call (the shared codec in
-     * `com.mapconductor.react.marker.NativeMarkerCodec`, also used identically by iOS's
-     * `mcMarkerStatesFromBatch`/`mcMarkerState`). Dispatches by the codec's `eventName` to the
-     * matching `topX` RN event.
-     */
-    private fun handleMarkerEvent(
-        eventName: String,
-        state: MarkerState,
-    ) {
-        when (eventName) {
-            "markerClick" -> emit("topMarkerClick", Arguments.createMap().apply { putString("markerId", state.id) })
-            "markerDragStart" -> emitMarkerDrag("topMarkerDragStart", state)
-            "markerDrag" -> emitMarkerDrag("topMarkerDrag", state)
-            "markerDragEnd" -> emitMarkerDrag("topMarkerDragEnd", state)
-            "markerAnimateStart" -> emitMarkerAnimate("topMarkerAnimateStart", state)
-            "markerAnimateEnd" -> emitMarkerAnimate("topMarkerAnimateEnd", state)
-        }
-    }
-
-    private fun emitMarkerDrag(
-        eventName: String,
-        state: MarkerState,
-    ) {
-        emit(
-            eventName,
-            Arguments.createMap().apply {
-                putString("markerId", state.id)
-                putMap("point", GeoPoint.from(state.position).toWritableMap())
-            },
-        )
-        // The dragged marker's geo position just changed but the camera didn't, so the
-        // screen-position emissions that normally follow a camera move (see
-        // configureController()) never fire on their own here - without this, an open
-        // InfoBubble anchored to this marker would stay frozen at the pre-drag location.
-        emitMarkerScreenPositions()
-        emitInfoBubbleScreenPositions()
-    }
-
-    private fun emitMarkerAnimate(
-        eventName: String,
-        state: MarkerState,
-    ) {
-        emit(
-            eventName,
-            Arguments.createMap().apply {
-                putString("markerId", state.id)
-            },
-        )
-    }
-}
-
-@Composable
-private fun RenderNativeExtensions(
-    scope: MapViewScope,
-    registry: MapOverlayRegistry,
-    controller: HereMapViewController,
-    serviceRegistry: MutableMapServiceRegistry,
-    host: NativeMapExtensionHostState,
-) {
-    DisposableEffect(controller) {
-        scope.groundImageCollector.setUpdateHandler { state ->
-            (controller as GroundImageCapableInterface).let { capable ->
-                if (capable.hasGroundImage(state)) capable.updateGroundImage(state)
-            }
-        }
-        scope.rasterLayerCollector.setUpdateHandler { state ->
-            (controller as RasterLayerCapableInterface).let { capable ->
-                if (capable.hasRasterLayer(state)) capable.updateRasterLayer(state)
-            }
-        }
-        scope.polygonCollector.setUpdateHandler { state ->
-            (controller as PolygonCapableInterface).let { capable ->
-                if (capable.hasPolygon(state)) capable.updatePolygon(state)
-            }
-        }
-        scope.polylineCollector.setUpdateHandler { state ->
-            (controller as PolylineCapableInterface).let { capable ->
-                if (capable.hasPolyline(state)) capable.updatePolyline(state)
-            }
-        }
-        scope.circleCollector.setUpdateHandler { state ->
-            (controller as CircleCapableInterface).let { capable ->
-                if (capable.hasCircle(state)) capable.updateCircle(state)
-            }
-        }
-        onDispose {
-            scope.groundImageCollector.setUpdateHandler(null)
-            scope.rasterLayerCollector.setUpdateHandler(null)
-            scope.polygonCollector.setUpdateHandler(null)
-            scope.polylineCollector.setUpdateHandler(null)
-            scope.circleCollector.setUpdateHandler(null)
-        }
-    }
-
-    CollectAndRenderOverlays(
-        registry = registry,
-        controller = controller,
-    )
-    CompositionLocalProvider(
-        LocalMapOverlayRegistry provides registry,
-        LocalMapServiceRegistry provides serviceRegistry,
-        LocalMapViewController provides controller,
-        LocalInfoBubbleCollector provides scope.bubbleFlow,
-        LocalCircleCollector provides scope.circleCollector,
-        LocalPolylineCollector provides scope.polylineCollector,
-        LocalPolygonCollector provides scope.polygonCollector,
-        LocalGroundImageCollector provides scope.groundImageCollector,
-        LocalRasterLayerCollector provides scope.rasterLayerCollector,
-    ) {
-        with(scope) {
-            with(host) { RenderExtensions() }
-        }
-    }
-}
-
-private const val MARKER_TRACE_TAG = "MCMarkerTrace"
-
-private fun markerTilingOptionsFromReadableMap(map: ReadableMap?, viewId: Int): MarkerTilingOptions {
-    if (map == null) return MarkerTilingOptions.Default
-    val hasIconScaleCallback = map.getBooleanOrNull("hasIconScaleCallback") ?: false
-    return MarkerTilingOptions.Default.copy(
-        enabled = map.getBooleanOrNull("enabled") ?: MarkerTilingOptions.Default.enabled,
-        debugTileOverlay = map.getBooleanOrNull("debugTileOverlay")
-            ?: MarkerTilingOptions.Default.debugTileOverlay,
-        minMarkerCount = map.getIntOrNull("minMarkerCount") ?: MarkerTilingOptions.Default.minMarkerCount,
-        cacheSize = map.getIntOrNull("cacheSize") ?: MarkerTilingOptions.Default.cacheSize,
-        iconScaleCallback =
-            if (hasIconScaleCallback) {
-                { state: MarkerState, zoom: Int -> MarkerScaleBridge.requestScale(viewId, state.id, zoom) }
-            } else {
-                null
-            },
-    )
-}
-
-private class HereMapViewWrapperEvent(
-    surfaceId: Int,
-    viewTag: Int,
-    private val name: String,
-    private val payload: WritableMap,
-) : Event<HereMapViewWrapperEvent>(surfaceId, viewTag) {
-    override fun getEventName(): String = name
-
-    override fun canCoalesce(): Boolean = false
-
-    override fun getEventData(): WritableMap = payload
 }

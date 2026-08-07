@@ -2,7 +2,6 @@ import type React from 'react';
 import { findNodeHandle, processColor, UIManager } from 'react-native';
 import {
   BaseMapViewController,
-  type CameraOptions,
   type CircleCapable,
   type CircleState,
   type GeoPoint,
@@ -29,6 +28,7 @@ import {
   type NativeMapExtensionDescriptor,
   type NativeMapExtensionEvent,
   type NativeMapExtensionEventHandler,
+  wrapClickedPoint,
 } from '@mapconductor/js-sdk-core';
 import {
   createNativeMarkerIconRegistry,
@@ -117,15 +117,14 @@ export class HereViewController
     return true;
   }
 
-  async animateCamera(position: MapCameraPosition, options: CameraOptions = {}): Promise<boolean> {
+  async animateCamera(position: MapCameraPosition, durationMillis: number): Promise<boolean> {
     this.cameraPosition = position;
-    this.dispatchCommand('animateCamera', [position, options.duration ?? 0]);
+    this.dispatchCommand('animateCamera', [position, durationMillis]);
     return true;
   }
 
-  async fitBounds(bounds: GeoRectBounds, options: CameraOptions = {}): Promise<boolean> {
-    if (bounds.isEmpty()) return false;
-    const padding = typeof options.padding === 'number' ? options.padding : 0;
+  async fitBounds(bounds: GeoRectBounds, padding: number): Promise<boolean> {
+    if (bounds.isEmpty) return false;
     this.dispatchCommand('fitBounds', [
       { southWest: bounds.southWest, northEast: bounds.northEast },
       padding,
@@ -137,9 +136,6 @@ export class HereViewController
     return this.cameraPosition;
   }
 
-  getBounds(): GeoRectBounds | null {
-    return null;
-  }
 
   async compositionMarkers(data: MarkerState[]): Promise<void> {
     const generation = ++this.markerCompositionGeneration;
@@ -439,7 +435,7 @@ export class HereViewController
   onNativeCircleClick(circleId: string, clicked: GeoPoint): void {
     const state = this.circleStates.get(circleId);
     if (!state) return;
-    const event = { state, clicked };
+    const event = { state, clicked: wrapClickedPoint(clicked) };
     state.onClick?.(event);
     this.circleClickListener?.(event);
   }
@@ -447,7 +443,7 @@ export class HereViewController
   onNativeGroundImageClick(groundImageId: string, clicked: GeoPoint): void {
     const state = this.groundImageStates.get(groundImageId);
     if (!state) return;
-    const event = { state, clicked };
+    const event = { state, clicked: wrapClickedPoint(clicked) };
     state.onClick?.(event);
     this.groundImageClickListener?.(event);
   }
@@ -455,7 +451,7 @@ export class HereViewController
   onNativePolylineClick(polylineId: string, clicked: GeoPoint): void {
     const state = this.polylineStates.get(polylineId);
     if (!state) return;
-    const event = { state, clicked };
+    const event = { state, clicked: wrapClickedPoint(clicked) };
     state.onClick?.(event);
     this.polylineClickListener?.(event);
   }
@@ -463,7 +459,7 @@ export class HereViewController
   onNativePolygonClick(polygonId: string, clicked: GeoPoint): void {
     const state = this.polygonStates.get(polygonId);
     if (!state) return;
-    const event = { state, clicked };
+    const event = { state, clicked: wrapClickedPoint(clicked) };
     state.onClick?.(event);
     this.polygonClickListener?.(event);
   }

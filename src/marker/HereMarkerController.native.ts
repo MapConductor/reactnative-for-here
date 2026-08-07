@@ -20,7 +20,8 @@ export function markerStateToNative(state: MarkerState): NativeHereMarkerState {
     position: state.position,
     clickable: state.clickable,
     draggable: state.draggable,
-    zIndex: state.zIndex,
+    // ネイティブ側は数値必須。未指定(null)は 0 として送る。
+    zIndex: state.zIndex ?? 0,
     icon: markerIconToNative(state.icon),
     animation: state.animation,
   };
